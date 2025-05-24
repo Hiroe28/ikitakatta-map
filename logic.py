@@ -210,7 +210,7 @@ def get_municipalities(prefecture):
         # デフォルトのリスト（主要都市）を返す
         return ["選択なし", "その他"]
 
-# キーワードから都道府県+市区町村の候補を検索する関数
+# キーワードから都道府県+市区町村の候補を検索する関数（改善版）
 def search_locations(keyword):
     if not keyword or len(keyword) < 2:
         return []
@@ -218,10 +218,17 @@ def search_locations(keyword):
     city_data = load_city_data()
     results = []
     
+    # 都道府県名のみでマッチした場合の結果を保存
+    prefecture_only_results = []
+    
     # 全都道府県から検索
     for prefecture, cities in city_data.items():
-        # 都道府県名にキーワードが含まれる場合は全市町村を含める
+        # 都道府県名にキーワードが含まれる場合
         prefecture_match = keyword in prefecture
+        
+        if prefecture_match:
+            # 都道府県のみの結果を追加
+            prefecture_only_results.append((prefecture, prefecture, ""))
         
         for city_name, city_info in cities.items():
             # 市区町村名、カタカナ、ひらがなのいずれかで部分一致
@@ -233,17 +240,24 @@ def search_locations(keyword):
                 full_location = f"{prefecture} {city_name}"
                 results.append((full_location, prefecture, city_name))
     
+    # 都道府県のみの結果を最初に追加（より幅広い選択肢として）
+    final_results = prefecture_only_results + results
+    
     # 結果がない場合は空のリストを返す
     # 結果が多すぎる場合は最初の50件に制限
-    if len(results) > 50:
-        results = results[:50]
+    if len(final_results) > 50:
+        final_results = final_results[:50]
         
-    return results
+    return final_results
 
 # 選択された場所文字列から都道府県と市区町村を分離する関数
 def split_location(location_string):
     if not location_string or location_string == "直接入力":
         return "", ""
+    
+    # オンライン・Web開催の場合
+    if location_string == "オンライン・Web開催":
+        return "オンライン・Web開催", ""
         
     parts = location_string.split(" ", 1)
     if len(parts) == 2:
@@ -436,7 +450,7 @@ def migrate_csv_if_needed():
 def save_row(row_data):
     return append_row_to_sheet(row_data)
 
-# 新しい投稿を保存する関数（イベントURL対応）
+# 新しい投稿を保存する関数（イベントURL対応、Web開催対応）
 def save_submission(event_name, event_url, event_prefecture, event_municipality, event_date, 
                    user_prefecture, user_municipality, reasons, comment):
     
@@ -446,6 +460,14 @@ def save_submission(event_name, event_url, event_prefecture, event_municipality,
     if user_municipality == "選択なし":
         user_municipality = ""
     
+    # Web開催の場合の特別処理
+    if event_prefecture == "オンライン・Web開催":
+        event_municipality = ""
+        # locationフィールドも同様に設定
+        location_value = "オンライン・Web開催"
+    else:
+        location_value = event_prefecture  # 後方互換性のため
+    
     # 新規IDの生成
     event_id = str(uuid.uuid4())
     
@@ -454,7 +476,7 @@ def save_submission(event_name, event_url, event_prefecture, event_municipality,
         "id": event_id,
         "event_name": event_name,
         "event_url": event_url if event_url else "",  # URLを追加
-        "location": event_prefecture,  # 後方互換性のため
+        "location": location_value,  # 後方互換性のため
         "event_prefecture": event_prefecture,
         "event_municipality": event_municipality if event_municipality else "",
         "event_date": event_date,
@@ -468,7 +490,7 @@ def save_submission(event_name, event_url, event_prefecture, event_municipality,
     
     return save_row(new_row)
 
-# 県別のイベント投稿数を集計する関数
+# 県別のイベント投稿数を集計する関数（Web開催対応）
 def count_by_prefecture():
     df = load_data()
     if df.empty:
@@ -483,7 +505,7 @@ def count_by_prefecture():
     counts.columns = ["location", "count"]
     return counts
 
-# イベント県と居住県のクロス集計を行う関数
+# イベント県と居住県のクロス集計を行う関数（Web開催対応）
 def cross_tabulate_prefectures():
     df = load_data()
     if df.empty:
@@ -576,3 +598,54 @@ def reset_spreadsheet():
     except Exception as e:
         print(f"スプレッドシートリセットエラー: {e}")
         return False
+
+# Web開催やオンライン開催のイベント数を取得する関数
+def count_online_events():
+    """オンライン・Web開催のイベント数を取得"""
+    df = load_data()
+    if df.empty:
+        return 0
+    
+    # event_prefectureカラムでWeb開催をカウント
+    if "event_prefecture" in df.columns:
+        online_count = len(df[df["event_prefecture"] == "オンライン・Web開催"])
+    else:
+        online_count = len(df[df["location"] == "オンライン・Web開催"])
+    
+    return online_count
+
+# 地域別データとオンラインデータを分けて取得する関数
+def get_location_statistics():
+    """地域別統計とオンライン統計を分けて取得"""
+    df = load_data()
+    if df.empty:
+        return {
+            "regional_data": pd.DataFrame(columns=["location", "count"]),
+            "online_count": 0,
+            "total_count": 0
+        }
+    
+    # 全体の統計
+    total_count = len(df)
+    
+    # オンライン開催の統計
+    online_count = count_online_events()
+    
+    # 地域別データ（オンライン開催を除く）
+    regional_df = df[df.get("event_prefecture", df.get("location", "")) != "オンライン・Web開催"]
+    
+    if not regional_df.empty:
+        if "event_prefecture" in regional_df.columns and not regional_df["event_prefecture"].isna().all():
+            regional_counts = regional_df["event_prefecture"].value_counts().reset_index()
+        else:
+            regional_counts = regional_df["location"].value_counts().reset_index()
+        
+        regional_counts.columns = ["location", "count"]
+    else:
+        regional_counts = pd.DataFrame(columns=["location", "count"])
+    
+    return {
+        "regional_data": regional_counts,
+        "online_count": online_count,
+        "total_count": total_count
+    }

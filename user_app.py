@@ -333,6 +333,27 @@ button[kind="primary"] {
     font-size: 0.9rem;
     margin-bottom: 1rem;
 }
+
+/* 開催地選択のスタイル */
+.location-option {
+    background: white;
+    border: 1px solid #dbdbdb;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin: 0.5rem 0;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.location-option:hover {
+    border-color: #fd5949;
+    background-color: #fafafa;
+}
+
+.location-option.selected {
+    border-color: #fd5949;
+    background-color: #fff5f5;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -399,12 +420,15 @@ def generate_tweet_text(event_name, reasons, event_location):
     # ハッシュタグ（f-stringを使用）
     hashtags = f"#行きたかったマップ #IkitakattaMap #{event_hashtag}"
     
-    # 地域タグ
-    if event_location and "都" in event_location:
-        hashtags += " #東京"
-    elif event_location:
-        prefecture = event_location.split()[0] if " " in event_location else event_location
-        hashtags += f" #{prefecture}"
+    # 地域タグ（Web開催の場合は除く）
+    if event_location and event_location != "オンライン・Web開催":
+        if "都" in event_location:
+            hashtags += " #東京"
+        else:
+            prefecture = event_location.split()[0] if " " in event_location else event_location
+            hashtags += f" #{prefecture}"
+    else:
+        hashtags += " #オンラインイベント"
     
     # ツイート本文
     tweet_text = f"{event_name}に行きたかったけど行けなかった😢 みんなの「行きたかった」の声を集めて、もっと参加しやすい社会にしていこう！ {hashtags}"
@@ -421,6 +445,9 @@ def generate_tweet_text(event_name, reasons, event_location):
 @st.cache_data(ttl=300)  # 5分間キャッシュ
 def cached_load_data():
     return logic.load_data()
+
+# --- 追加: 禁止語リスト ---
+NG_WORDS = ["寄り添", "共感", "お察し", "深く理解", "寄り添いたい"]
 
 def generate_empathy_comment_stream(event_name, reasons, comment):
     """ストリーミング対応のAIコメント生成ジェネレーター"""
@@ -459,16 +486,17 @@ def generate_empathy_comment_stream(event_name, reasons, comment):
 - 特に子育て中の方への深い理解を示す
 - 社会変革への可能性を前向きに伝える
 - その人の行動の価値を認める
+- 以下の語句を一切使わない：{", ".join(NG_WORDS)}
 
 参加できなかった理由: {', '.join(reasons)}
 ユーザーのコメント: {comment if comment else '(コメントなし)'}
 
-重要：特に子育て中の困難（託児の問題、時間の制約、周囲の理解不足など）に対する深い理解を示し、それが個人の問題ではなく社会の構造的な問題であることを伝えてください。
+重要：特に子育て中の困難（託児の問題、時間の制約、周囲の理解不足など）に対する深い理解を示し、それを個人の問題ではなく社会の構造的な問題として変えていこうということを伝えてください。
 """
         
         # AIによるストリーミングコメント生成
         stream = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "あなたは社会課題の解決に取り組む共感力豊かなカウンセラーです。特に子育て中の方や働く方々が直面する困難を深く理解し、個人の体験を社会課題として捉え、集合的な力で変化を起こすことを信じています。"},
                 {"role": "user", "content": prompt}
@@ -490,6 +518,62 @@ def generate_empathy_comment_stream(event_name, reasons, comment):
         for char in default_message:
             yield char
 
+# フォームデータの復元関数
+def restore_form_data():
+    """session_stateからフォームデータを復元"""
+    if 'form_data' in st.session_state and st.session_state.form_data:
+        form_data = st.session_state.form_data
+        
+        # 各フィールドのsession_stateキーに値を復元
+        if "event_name" in form_data:
+            st.session_state["event_name_input"] = form_data["event_name"]
+        if "event_url" in form_data:
+            st.session_state["event_url_input"] = form_data["event_url"]
+        if "other_reason" in form_data:
+            st.session_state["other_reason_input"] = form_data["other_reason"]
+        if "comment" in form_data:
+            st.session_state["comment_input"] = form_data["comment"]
+            
+        # 理由のチェックボックスを復元
+        if "selected_reasons" in form_data:
+            for reason in form_data["selected_reasons"]:
+                if not reason.startswith("その他:"):
+                    st.session_state[f"reason_{reason}"] = True
+                else:
+                    # その他理由の処理
+                    other_text = reason.replace("その他: ", "")
+                    st.session_state["other_reason_input"] = other_text
+        
+        # 位置関連の復元
+        if "event_location_search" in form_data:
+            st.session_state["event_location_input"] = form_data["event_location_search"]
+        if "user_location_search" in form_data:
+            st.session_state["user_location_input"] = form_data["user_location_search"]
+            
+        # 検索結果の復元
+        if "event_search_clicked" in form_data:
+            st.session_state.event_search_clicked = form_data["event_search_clicked"]
+        if "event_location_results" in form_data:
+            st.session_state.event_location_results = form_data["event_location_results"]
+        if "user_search_clicked" in form_data:
+            st.session_state.user_search_clicked = form_data["user_search_clicked"]
+        if "user_location_results" in form_data:
+            st.session_state.user_location_results = form_data["user_location_results"]
+
+# 居住地検索のコールバック関数
+def handle_user_location_search():
+    """居住地検索のEnterキー対応"""
+    if st.session_state.user_location_input and len(st.session_state.user_location_input) >= 2:
+        st.session_state.user_search_clicked = True
+        st.session_state.user_location_results = logic.search_locations(st.session_state.user_location_input)
+
+# イベント検索のコールバック関数
+def handle_event_location_search():
+    """イベント開催地検索のEnterキー対応"""
+    if st.session_state.event_location_input and len(st.session_state.event_location_input) >= 2:
+        st.session_state.event_search_clicked = True
+        st.session_state.event_location_results = logic.search_locations(st.session_state.event_location_input)
+
 def main():
     # スプレッドシートの初期化と必要ならマイグレーション
     logic.migrate_csv_if_needed()
@@ -509,20 +593,16 @@ def main():
     
     if 'is_submitting' not in st.session_state:
         st.session_state.is_submitting = False
-    
-    # フォーム入力データの初期化（戻るボタン用）
-    if 'event_name' not in st.session_state:
-        st.session_state.event_name = ""
-    if 'event_url' not in st.session_state:
-        st.session_state.event_url = ""
-    if 'comment' not in st.session_state:
-        st.session_state.comment = ""
-    if 'other_reason' not in st.session_state:
-        st.session_state.other_reason = ""
-    if 'event_location_search' not in st.session_state:
-        st.session_state.event_location_search = ""
-    if 'user_location_search' not in st.session_state:
-        st.session_state.user_location_search = ""
+        
+    # 検索状態の初期化
+    if "event_search_clicked" not in st.session_state:
+        st.session_state.event_search_clicked = False
+    if "event_location_results" not in st.session_state:
+        st.session_state.event_location_results = []
+    if "user_search_clicked" not in st.session_state:
+        st.session_state.user_search_clicked = False
+    if "user_location_results" not in st.session_state:
+        st.session_state.user_location_results = []
     
     # ヘッダー
     st.markdown("""
@@ -537,92 +617,147 @@ def main():
     
     # タブ1: 投稿フォーム
     with tab1:
+        # フォーム画面から戻った場合はデータを復元
+        if st.session_state.stage == 'form' and st.session_state.form_data:
+            restore_form_data()
+        
         if st.session_state.stage == 'form':
-            # 入力フォーム
-            with st.form(key="ikitakatta_form"):
-                # イベント名
-                st.markdown('<div class="form-label">🎯 どのイベントに行きたかったですか？</div>', unsafe_allow_html=True)
-                col1, col2 = st.columns([2, 3])
-                with col1:
-                    event_name = st.text_input("", label_visibility="collapsed", 
-                                             value=st.session_state.event_name,
-                                             placeholder="例: AI勉強会、Tech Conference")
-                with col2:
-                    st.markdown("<div style='padding-top: 8px; font-size: 1.2rem; color: #fd5949;'>に行きたかったけど行けなかった！</div>", unsafe_allow_html=True)
+            
+            # ===== すべてフォーム外での入力（リアルタイム自動保存） =====
+            
+            # イベント名
+            st.markdown('<div class="form-label">🎯 どのイベントに行きたかったですか？</div>', unsafe_allow_html=True)
+            col1, col2 = st.columns([2, 3])
+            with col1:
+                event_name = st.text_input(
+                    "", 
+                    label_visibility="collapsed",
+                    placeholder="例: AI勉強会、Tech Conference",
+                    key="event_name_input"
+                )
+            with col2:
+                st.markdown("<div style='padding-top: 8px; font-size: 1.2rem; color: #fd5949;'>に行きたかったけど行けなかった！</div>", unsafe_allow_html=True)
+            
+            # イベントURL
+            st.markdown('<div class="form-label">🔗 イベントのURL（任意）</div>', unsafe_allow_html=True)
+            st.markdown('<div class="form-sublabel">イベントページやSNS投稿のURLがあれば教えてください</div>', unsafe_allow_html=True)
+            event_url = st.text_input(
+                "", 
+                label_visibility="collapsed",
+                placeholder="例: https://connpass.com/event/...",
+                key="event_url_input"
+            )
+            
+            st.markdown("---")
+            
+            # 参加できなかった理由
+            st.markdown('<div class="form-label">🤔 参加できなかった理由は？</div>', unsafe_allow_html=True)
+            st.markdown('<div class="form-sublabel">あてはまるものをすべて選んでください</div>', unsafe_allow_html=True)
+            
+            selected_reasons = []
+            
+            for category, reasons_list in IMPROVED_REASONS.items():
+                st.markdown(f'<div class="reason-category">{category}</div>', unsafe_allow_html=True)
                 
-                # イベントURL（新規追加）
-                st.markdown('<div class="form-label">🔗 イベントのURL（任意）</div>', unsafe_allow_html=True)
-                st.markdown('<div class="form-sublabel">イベントページやSNS投稿のURLがあれば教えてください</div>', unsafe_allow_html=True)
-                event_url = st.text_input("", label_visibility="collapsed", 
-                                         value=st.session_state.event_url,
-                                         placeholder="例: https://connpass.com/event/...")
+                # チェックボックスを2列で配置
+                cols = st.columns(2)
+                for i, reason in enumerate(reasons_list):
+                    col_index = i % 2
+                    with cols[col_index]:
+                        if st.checkbox(reason, key=f"reason_{reason}"):
+                            selected_reasons.append(reason)
+            
+            # その他の理由
+            st.markdown('<div class="form-label">✍️ その他の理由があれば教えてください</div>', unsafe_allow_html=True)
+            other_reason = st.text_input(
+                "", 
+                label_visibility="collapsed",
+                placeholder="具体的な理由があれば...",
+                key="other_reason_input"
+            )
+            
+            if other_reason:
+                selected_reasons.append(f"その他: {other_reason}")
+            
+            st.markdown("---")
+            
+            # 思い・コメント
+            st.markdown('<div class="form-label">💭 思いや気持ちを聞かせてください（任意）</div>', unsafe_allow_html=True)
+            comment = st.text_area(
+                "", 
+                label_visibility="collapsed", 
+                height=100,
+                placeholder="どんな気持ちでしたか？どうすれば参加できたと思いますか？",
+                key="comment_input"
+            )
+            
+            st.markdown("---")
+            
+            # 開催地選択
+            st.markdown('<div class="form-label">📍 イベント開催地を教えてください</div>', unsafe_allow_html=True)
+            
+            # 開催地のタイプ選択
+            current_location_type = st.radio(
+                "開催形式",
+                options=["地域検索（市町村名）", "オンライン・Web開催", "都道府県のみ"],
+                horizontal=True,
+                key="location_type_radio"
+            )
+            
+            # 変数の初期化（すべての条件分岐で使用される変数）
+            event_prefecture = ""
+            event_municipality = ""
+            event_location_selected = None
+            location_valid = False
+            event_location_search = ""  # 初期化追加
+            
+            if current_location_type == "オンライン・Web開催":
+                # オンライン開催の場合
+                event_prefecture = "オンライン・Web開催"
+                event_municipality = ""
+                event_location_selected = "オンライン・Web開催"
+                location_valid = True
+                st.success("🌐 オンライン・Web開催として記録されます")
+            
+            elif current_location_type == "都道府県のみ":
+                # 都道府県のみの場合
+                prefectures = list(logic.PREFECTURE_LOCATIONS.keys())
+                selected_pref = st.selectbox(
+                    "都道府県を選択してください",
+                    options=prefectures,
+                    index=None,
+                    placeholder="都道府県を選んでください",
+                    key="prefecture_select"
+                )
                 
-                st.markdown("---")
-                
-                # 参加できなかった理由（改善されたカテゴリ別）
-                st.markdown('<div class="form-label">🤔 参加できなかった理由は？</div>', unsafe_allow_html=True)
-                st.markdown('<div class="form-sublabel">あてはまるものをすべて選んでください</div>', unsafe_allow_html=True)
-                
-                selected_reasons = []
-                
-                for category, reasons_list in IMPROVED_REASONS.items():
-                    st.markdown(f'<div class="reason-category">{category}</div>', unsafe_allow_html=True)
-                    
-                    # チェックボックスを2列で配置
-                    cols = st.columns(2)
-                    for i, reason in enumerate(reasons_list):
-                        col_index = i % 2
-                        with cols[col_index]:
-                            if st.checkbox(reason, key=f"reason_{reason}"):
-                                selected_reasons.append(reason)
-                
-                # その他の理由
-                st.markdown('<div class="form-label">✍️ その他の理由があれば教えてください</div>', unsafe_allow_html=True)
-                other_reason = st.text_input("", label_visibility="collapsed", 
-                                           value=st.session_state.other_reason,
-                                           placeholder="具体的な理由があれば...")
-                
-                if other_reason:
-                    selected_reasons.append(f"その他: {other_reason}")
-                
-                st.markdown("---")
-                
-                # 思い・コメント
-                st.markdown('<div class="form-label">💭 思いや気持ちを聞かせてください（任意）</div>', unsafe_allow_html=True)
-                comment = st.text_area("", label_visibility="collapsed", 
-                                     height=100, value=st.session_state.comment,
-                                     placeholder="どんな気持ちでしたか？どうすれば参加できたと思いますか？")
-                
-                st.markdown("---")
-                
-                # イベント開催地（必須）
-                st.markdown('<div class="form-label">📍 イベント開催地を教えてください</div>', unsafe_allow_html=True)
-                
+                if selected_pref:
+                    event_prefecture = selected_pref
+                    event_municipality = ""
+                    event_location_selected = selected_pref
+                    location_valid = True
+                    st.success(f"📍 {selected_pref}として記録されます")
+                else:
+                    st.info("📍 都道府県を選択してください")
+            
+            else:
+                # 地域検索の場合
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    event_location_search = st.text_input("", label_visibility="collapsed", 
-                                                        placeholder="例: 渋谷、新宿、札幌", 
-                                                        key="event_location_input", 
-                                                        value=st.session_state.event_location_search)
-                
-                # セッション状態の初期化
-                if "event_search_clicked" not in st.session_state:
-                    st.session_state.event_search_clicked = False
-                if "event_location_results" not in st.session_state:
-                    st.session_state.event_location_results = []
+                    event_location_search = st.text_input(
+                        "", 
+                        label_visibility="collapsed", 
+                        placeholder="例: 渋谷、新宿、札幌", 
+                        key="event_location_input",
+                        on_change=handle_event_location_search  # Enterキー対応
+                    )
                 
                 with col2:
-                    event_search_button = st.form_submit_button("🔍 検索")
+                    event_search_button = st.button("🔍 検索", key="event_search_btn")
                 
                 # 検索ボタンが押されたかどうかを判定
                 if event_search_button and event_location_search and len(event_location_search) >= 2:
                     st.session_state.event_search_clicked = True
                     st.session_state.event_location_results = logic.search_locations(event_location_search)
-                
-                event_prefecture = ""
-                event_municipality = ""
-                event_location_selected = None
-                location_valid = False
                 
                 # 検索結果の表示
                 if st.session_state.event_search_clicked:
@@ -642,104 +777,104 @@ def main():
                         st.warning("🔍 検索結果がありません。別のキーワードをお試しください。")
                         event_location_selected = None
                 else:
-                    st.info("📝 地域名を入力して「🔍 検索」ボタンを押してください")
-                
-                # あなたの居住地（任意）
-                st.markdown('<div class="form-label">🏠 あなたの居住地（任意）</div>', unsafe_allow_html=True)
-                
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    user_location_search = st.text_input("", label_visibility="collapsed", 
-                                                       placeholder="例: 横浜、大阪、福岡", 
-                                                       key="user_location_input", 
-                                                       value=st.session_state.user_location_search)
-                
-                if "user_search_clicked" not in st.session_state:
-                    st.session_state.user_search_clicked = False
-                if "user_location_results" not in st.session_state:
-                    st.session_state.user_location_results = []
-                
-                with col2:
-                    user_search_button = st.form_submit_button("🏠 検索")
-                
-                if user_search_button and user_location_search and len(user_location_search) >= 2:
-                    st.session_state.user_search_clicked = True
-                    st.session_state.user_location_results = logic.search_locations(user_location_search)
-                
-                user_prefecture = ""
-                user_municipality = ""
-                user_location_selected = None
-                
-                if st.session_state.user_search_clicked:
-                    if st.session_state.user_location_results:
-                        user_location_options = [location for location, _, _ in st.session_state.user_location_results]
-                        
-                        user_location_selected = st.selectbox(
-                            "居住地の検索結果から選んでください", 
-                            options=user_location_options,
-                            key="user_location_select"
-                        )
-                        
-                        if user_location_selected:
-                            user_prefecture, user_municipality = logic.split_location(user_location_selected)
-                    else:
-                        st.warning("🔍 検索結果がありません。別のキーワードをお試しください。")
-                
-                # イベント日付（非表示）
-                event_date = datetime.now().strftime("%Y-%m-%d")
-                
-                # 送信ボタン
-                submit_button = st.form_submit_button("✅ 内容を確認する", use_container_width=True)
-                
-                if submit_button:
-                    # 入力チェック
-                    error = False
+                    st.info("📝 地域名を入力して「🔍 検索」ボタンを押すか、Enterキーを押してください")
+            
+            # あなたの居住市町村名（任意）
+            st.markdown('<div class="form-label">🏠 あなたの居住地（任意）</div>', unsafe_allow_html=True)
+            
+            # 居住地検索変数の初期化
+            user_location_search = ""  # 初期化追加
+            
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                user_location_search = st.text_input(
+                    "", 
+                    label_visibility="collapsed", 
+                    placeholder="例: 横浜、大阪、福岡", 
+                    key="user_location_input",
+                    on_change=handle_user_location_search  # Enterキー対応を追加
+                )
+            
+            with col2:
+                user_search_button = st.button("🏠 検索", key="user_search_btn")
+            
+            if user_search_button and user_location_search and len(user_location_search) >= 2:
+                st.session_state.user_search_clicked = True
+                st.session_state.user_location_results = logic.search_locations(user_location_search)
+            
+            # 居住地関連変数の初期化
+            user_prefecture = ""
+            user_municipality = ""
+            user_location_selected = None
+            
+            if st.session_state.user_search_clicked:
+                if st.session_state.user_location_results:
+                    user_location_options = [location for location, _, _ in st.session_state.user_location_results]
                     
-                    if not event_name:
-                        st.error("🎯 イベント名を入力してください")
-                        error = True
+                    user_location_selected = st.selectbox(
+                        "居住地の検索結果から選んでください", 
+                        options=user_location_options,
+                        key="user_location_select"
+                    )
                     
-                    # URLの妥当性チェック
-                    if event_url and not is_valid_url(event_url):
-                        st.error("🔗 有効なURLを入力してください（http://またはhttps://で始まる形式）")
-                        error = True
+                    if user_location_selected:
+                        user_prefecture, user_municipality = logic.split_location(user_location_selected)
+                else:
+                    st.warning("🔍 検索結果がありません。別のキーワードをお試しください。")
+            else:
+                st.info("📝 地域名を入力して「🏠 検索」ボタンを押すか、Enterキーを押してください")
+            
+            # 送信ボタン
+            event_date = datetime.now().strftime("%Y-%m-%d")
+            
+            if st.button("✅ 内容を確認する", type="primary", use_container_width=True):
+                # 入力チェック
+                error = False
+                
+                if not event_name:
+                    st.error("🎯 イベント名を入力してください")
+                    error = True
+                
+                # URLの妥当性チェック
+                if event_url and not is_valid_url(event_url):
+                    st.error("🔗 有効なURLを入力してください（http://またはhttps://で始まる形式）")
+                    error = True
+                
+                if not location_valid:
+                    st.error("📍 イベント開催地を選択してください")
+                    error = True
+                
+                if not selected_reasons:
+                    st.error("🤔 参加できなかった理由を選択してください")
+                    error = True
+                
+                if not error:
+                    # フォームデータをセッションに保存（検索状態も含む）
+                    st.session_state.form_data = {
+                        "event_name": event_name,
+                        "event_url": event_url,
+                        "event_prefecture": event_prefecture,
+                        "event_municipality": event_municipality,
+                        "event_location_selected": event_location_selected,
+                        "event_date": event_date,
+                        "user_prefecture": user_prefecture,
+                        "user_municipality": user_municipality,
+                        "user_location_selected": user_location_selected,
+                        "selected_reasons": selected_reasons,
+                        "other_reason": other_reason,
+                        "comment": comment,
+                        # 検索状態を保存（修正フォームで使用）
+                        "event_location_search": event_location_search,
+                        "user_location_search": user_location_search,
+                        "event_search_clicked": st.session_state.event_search_clicked,
+                        "event_location_results": st.session_state.event_location_results,
+                        "user_search_clicked": st.session_state.user_search_clicked,
+                        "user_location_results": st.session_state.user_location_results,
+                    }
                     
-                    if not location_valid:
-                        st.error("📍 イベント開催地を選択してください")
-                        error = True
-                    
-                    if not selected_reasons:
-                        st.error("🤔 参加できなかった理由を選択してください")
-                        error = True
-                    
-                    if not error:
-                        # フォームデータをセッションに保存
-                        st.session_state.form_data = {
-                            "event_name": event_name,
-                            "event_url": event_url,  # URLを追加
-                            "event_prefecture": event_prefecture,
-                            "event_municipality": event_municipality,
-                            "event_location_selected": event_location_selected,
-                            "event_date": event_date,
-                            "user_prefecture": user_prefecture,
-                            "user_municipality": user_municipality,
-                            "user_location_selected": user_location_selected,
-                            "selected_reasons": selected_reasons,
-                            "other_reason": other_reason,
-                            "comment": comment
-                        }
-                        
-                        # 個別のフィールド値もセッションに保存
-                        st.session_state.event_name = event_name
-                        st.session_state.event_url = event_url
-                        st.session_state.comment = comment
-                        st.session_state.other_reason = other_reason
-                        st.session_state.event_location_search = event_location_search
-                        st.session_state.user_location_search = user_location_search
-                        
-                        # 確認画面へ
-                        st.session_state.stage = 'confirm'
-                        st.rerun()
+                    # 確認画面へ
+                    st.session_state.stage = 'confirm'
+                    st.rerun()
         
         elif st.session_state.stage == 'confirm':
             # 確認画面
@@ -800,7 +935,7 @@ def main():
                     
                     if success:
                         # ツイート用テキストを生成
-                        event_location = f"{form_data['event_prefecture']} {form_data['event_municipality']}".strip()
+                        event_location = form_data['event_location_selected']
                         tweet_data = generate_tweet_text(
                             form_data['event_name'], 
                             form_data['selected_reasons'], 
@@ -923,6 +1058,11 @@ def main():
                     st.session_state.ai_comment = ""
                     st.session_state.ai_comment_generated = False
                     st.session_state.is_submitting = False
+                    # 検索状態をリセット
+                    st.session_state.event_search_clicked = False
+                    st.session_state.event_location_results = []
+                    st.session_state.user_search_clicked = False
+                    st.session_state.user_location_results = []
                     if 'tweet_data' in st.session_state:
                         del st.session_state.tweet_data
                     st.rerun()
@@ -948,13 +1088,14 @@ def main():
             display_df["reasons"] = display_df["reasons"].str.split("|")
             display_df["reasons"] = display_df["reasons"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
             
-            # 開催地情報を結合
+            # 開催地情報を結合（Web開催対応）
             display_df["event_location"] = display_df.apply(
-                lambda row: f"{row['event_prefecture']} {row['event_municipality']}" 
-                    if 'event_prefecture' in row and 'event_municipality' in row 
-                       and row['event_municipality'] and row['event_municipality'] != "選択なし"
-                    else (row['event_prefecture'] if 'event_prefecture' in row and row['event_prefecture'] 
-                         else row['location']), 
+                lambda row: row['event_prefecture'] if row['event_prefecture'] == "オンライン・Web開催" 
+                    else (f"{row['event_prefecture']} {row['event_municipality']}" 
+                          if 'event_prefecture' in row and 'event_municipality' in row 
+                             and row['event_municipality'] and row['event_municipality'] != "選択なし"
+                          else (row['event_prefecture'] if 'event_prefecture' in row and row['event_prefecture'] 
+                               else row['location'])), 
                 axis=1
             )
             
@@ -970,7 +1111,12 @@ def main():
                 if row.get('event_url') and row['event_url'] and row['event_url'].strip():
                     st.markdown(f"🔗 **イベントURL:** [{row['event_url']}]({row['event_url']})")
                 
-                st.write(f"📍 **開催地:** {row['event_location']}")
+                # 開催地の表示（Web開催の場合は特別表示）
+                if row['event_location'] == "オンライン・Web開催":
+                    st.write(f"🌐 **開催形式:** {row['event_location']}")
+                else:
+                    st.write(f"📍 **開催地:** {row['event_location']}")
+                
                 st.write(f"🤔 **理由:** {row['reasons']}")
                 
                 if row.get('comment') and not pd.isna(row.get('comment')) and str(row.get('comment')).strip():
@@ -992,14 +1138,25 @@ def main():
             </div>
             """, unsafe_allow_html=True)
         else:
-            # 県別データの集計
+            # 県別データの集計（Web開催を除外）
             prefecture_counts = logic.count_by_prefecture()
             
-            # マップデータの準備
+            # Web開催を除いた統計とWeb開催の統計を分けて表示
+            online_count = len(df[df['event_prefecture'] == 'オンライン・Web開催'])
+            
+            if online_count > 0:
+                st.info(f"🌐 オンライン・Web開催のイベント: {online_count}件")
+                st.markdown("---")
+            
+            # マップデータの準備（Web開催を除く）
             map_data = []
             for idx, row in prefecture_counts.iterrows():
                 prefecture = row["location"]
                 count = row["count"]
+                
+                # Web開催は除外
+                if prefecture == "オンライン・Web開催":
+                    continue
                 
                 if prefecture in logic.PREFECTURE_LOCATIONS:
                     lat, lon = logic.PREFECTURE_LOCATIONS[prefecture]
@@ -1056,15 +1213,17 @@ def main():
                 )
                 
                 st.pydeck_chart(r)
-                
-                # 理由別の集計をシンプルに表示
-                st.markdown('<div class="section-header">📊 参加できなかった理由の集計</div>', unsafe_allow_html=True)
-                reasons_df = logic.count_by_reason()
-                
-                if not reasons_df.empty:
-                    # 詳細なテーブル表示
-                    with st.expander("📋 詳細な集計を見る"):
-                        st.dataframe(reasons_df, use_container_width=True)
+            else:
+                st.info("🗺️ 地域別のデータがまだありません（オンライン開催のみ）")
+            
+            # 理由別の集計をシンプルに表示
+            st.markdown('<div class="section-header">📊 参加できなかった理由の集計</div>', unsafe_allow_html=True)
+            reasons_df = logic.count_by_reason()
+            
+            if not reasons_df.empty:
+                # 詳細なテーブル表示
+                with st.expander("📋 詳細な集計を見る"):
+                    st.dataframe(reasons_df, use_container_width=True)
 
 if __name__ == "__main__":
     main()
