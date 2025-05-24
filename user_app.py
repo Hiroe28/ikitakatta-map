@@ -699,7 +699,7 @@ def main():
             # 開催地のタイプ選択
             current_location_type = st.radio(
                 "開催形式",
-                options=["地域検索（市町村名）", "オンライン・Web開催", "都道府県のみ"],
+                options=["地域検索（市町村名がわかる場合）", "オンライン・Web開催", "都道府県のみわかる"],
                 horizontal=True,
                 key="location_type_radio"
             )
@@ -719,7 +719,7 @@ def main():
                 location_valid = True
                 st.success("🌐 オンライン・Web開催として記録されます")
             
-            elif current_location_type == "都道府県のみ":
+            elif current_location_type == "都道府県のみわかる":
                 # 都道府県のみの場合
                 prefectures = list(logic.PREFECTURE_LOCATIONS.keys())
                 selected_pref = st.selectbox(
@@ -746,7 +746,7 @@ def main():
                     event_location_search = st.text_input(
                         "", 
                         label_visibility="collapsed", 
-                        placeholder="例: 渋谷、新宿、札幌", 
+                        placeholder="例: 渋谷、新宿、しぶや、しんじゅく", 
                         key="event_location_input",
                         on_change=handle_event_location_search  # Enterキー対応
                     )
