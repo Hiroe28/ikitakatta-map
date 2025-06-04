@@ -9,12 +9,12 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import time
+from collections import defaultdict
 
 # ファイルパス設定
-CITY_DATA_FILE = "pref_city_with_kana.json"
+CITY_DATA_FILE = "pref_city_with_coordinates.json"
 
 # 県庁所在地の緯度経度データ
-# データソース: https://www.benricho.org/chimei/latlng_data.html
 PREFECTURE_LOCATIONS = {
     "北海道": [43.06417, 141.34694],
     "青森県": [40.82444, 140.74],
@@ -65,98 +65,74 @@ PREFECTURE_LOCATIONS = {
     "沖縄県": [26.2125, 127.68111],
 }
 
-
-# スプレッドシートの列の定義（イベントURL追加）
+# スプレッドシートの列の定義（generated_postを追加）
 SHEET_COLUMNS = [
     "id", "event_name", "event_url", "location", "event_date", 
     "reasons", "comment", "submission_date",
     "event_prefecture", "event_municipality", 
     "user_prefecture", "user_municipality",
+    "generated_post",  # 追加: 生成された投稿文
     "reason_details"
 ]
 
-# Googleスプレッドシートクライアントを取得する関数
+# Googleスプレッドシート関連の関数は既存のものを使用
 @st.cache_resource
 def get_gspread_client():
     """Google Sheets APIクライアントを取得"""
     try:
-        # secrets.tomlから認証情報を取得
         credentials_dict = st.secrets["gcp_service_account"]
-        
-        # 認証情報を作成
         scope = ["https://spreadsheets.google.com/feeds", 
                 "https://www.googleapis.com/auth/drive"]
-        
         credentials = Credentials.from_service_account_info(
             credentials_dict, scopes=scope)
-        
-        # gspreadクライアントを作成
         client = gspread.authorize(credentials)
-        
         return client
     except Exception as e:
         print(f"Google Sheets認証エラー: {e}")
         st.error(f"Google Sheets認証エラー: {e}")
         return None
 
-# スプレッドシートを取得する関数
-@st.cache_resource(ttl=300)  # 5分間キャッシュ（長めに設定）
+@st.cache_resource(ttl=300)
 def get_spreadsheet():
     """スプレッドシートを取得"""
     try:
         client = get_gspread_client()
         if client is None:
             return None
-            
-        # secrets.tomlからスプレッドシートキーを取得
         spreadsheet_key = st.secrets["spreadsheet_key"]["spreadsheet_key"]
-        
-        # スプレッドシートを開く
         spreadsheet = client.open_by_key(spreadsheet_key)
-        
         return spreadsheet
     except Exception as e:
         print(f"スプレッドシート取得エラー: {e}")
         st.error(f"スプレッドシート取得エラー: {e}")
         return None
 
-# ワークシートの初期化
-@st.cache_resource(ttl=300)  # 5分間キャッシュ
+@st.cache_resource(ttl=300)
 def initialize_worksheet():
     """ワークシートが存在しない場合は作成し、ヘッダーを設定"""
     try:
         spreadsheet = get_spreadsheet()
         if spreadsheet is None:
             return None
-            
-        # "ikitakatta_data"ワークシートを探す
         try:
             worksheet = spreadsheet.worksheet("ikitakatta_data")
         except gspread.WorksheetNotFound:
-            # ワークシートが存在しない場合は作成
             worksheet = spreadsheet.add_worksheet(
                 title="ikitakatta_data", 
                 rows="1000", 
                 cols="20"
             )
         
-        # 現在のヘッダー行を確認
         try:
             current_header = worksheet.row_values(1)
         except:
             current_header = []
         
-        # ヘッダーが設定されていないか、正しくない場合は設定
         if not current_header or current_header != SHEET_COLUMNS:
             print(f"ヘッダーを設定します: {SHEET_COLUMNS}")
-            # 既存のデータがある場合は、ワークシートをクリアしてからヘッダーを設定
             if current_header and len(current_header) > 0:
-                # データがある場合は警告を出す
                 print("警告: 既存のデータがあるワークシートのヘッダーを修正します")
-                # ワークシートを完全にクリア
                 worksheet.clear()
-            
-            # 正しいヘッダーを設定
             worksheet.update('A1', [SHEET_COLUMNS])
         
         return worksheet
@@ -165,18 +141,17 @@ def initialize_worksheet():
         st.error(f"ワークシート初期化エラー: {e}")
         return None
 
-# レート制限対応のリトライ機能
 def retry_on_quota_error(func, max_retries=3, delay=2):
     """Google Sheets APIのクォータエラー時にリトライする"""
     for attempt in range(max_retries):
         try:
             return func()
         except gspread.exceptions.APIError as e:
-            if e.response.status_code == 429:  # Quota exceeded
+            if e.response.status_code == 429:
                 if attempt < max_retries - 1:
                     print(f"レート制限エラー - {delay}秒後にリトライします (試行 {attempt + 1}/{max_retries})")
                     time.sleep(delay)
-                    delay *= 2  # 指数バックオフ
+                    delay *= 2
                     continue
                 else:
                     print("最大リトライ回数に達しました")
@@ -188,84 +163,88 @@ def retry_on_quota_error(func, max_retries=3, delay=2):
     return None
 
 def load_city_data():
+    """座標付き市区町村データを読み込む"""
     try:
         if os.path.exists(CITY_DATA_FILE):
             with open(CITY_DATA_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         else:
-            # ファイルが存在しない場合は空の辞書を返す
+            print(f"警告: {CITY_DATA_FILE} が見つかりません。既存の県庁所在地データを使用します。")
             return {}
     except Exception as e:
         print(f"市区町村データ読み込みエラー: {e}")
         return {}
 
-# 都道府県に対応する市区町村のリストを取得
 def get_municipalities(prefecture):
+    """都道府県に対応する市区町村のリストを取得"""
     city_data = load_city_data()
     
     if prefecture in city_data:
-        # JSONデータがある場合はそれを使用
         return ["選択なし"] + sorted(list(city_data[prefecture].keys()))
     else:
-        # デフォルトのリスト（主要都市）を返す
         return ["選択なし", "その他"]
 
-# キーワードから都道府県+市区町村の候補を検索する関数（改善版）
+def get_municipality_coordinates(prefecture, municipality):
+    """市町村の座標を取得"""
+    city_data = load_city_data()
+    
+    if prefecture in city_data:
+        if municipality in city_data[prefecture]:
+            coord_data = city_data[prefecture][municipality]
+            return coord_data.get('latitude'), coord_data.get('longitude')
+        
+        # 部分一致を試す
+        for city_name, coord_data in city_data[prefecture].items():
+            if municipality in city_name or city_name in municipality:
+                return coord_data.get('latitude'), coord_data.get('longitude')
+    
+    return None, None
+
 def search_locations(keyword):
+    """キーワードから都道府県+市区町村の候補を検索する関数"""
     if not keyword or len(keyword) < 2:
         return []
         
     city_data = load_city_data()
     results = []
-    
-    # 都道府県名のみでマッチした場合の結果を保存
     prefecture_only_results = []
     
-    # 全都道府県から検索
     for prefecture, cities in city_data.items():
-        # 都道府県名にキーワードが含まれる場合
         prefecture_match = keyword in prefecture
         
         if prefecture_match:
-            # 都道府県のみの結果を追加
             prefecture_only_results.append((prefecture, prefecture, ""))
         
         for city_name, city_info in cities.items():
-            # 市区町村名、カタカナ、ひらがなのいずれかで部分一致
             if (prefecture_match or 
                 keyword in city_name or 
                 ('city_kana' in city_info and keyword in city_info['city_kana']) or 
                 ('city_hiragana' in city_info and keyword in city_info['city_hiragana'])):
-                # 都道府県 + 市区町村 のフォーマットで結果を追加
                 full_location = f"{prefecture} {city_name}"
                 results.append((full_location, prefecture, city_name))
     
-    # 都道府県のみの結果を最初に追加（より幅広い選択肢として）
     final_results = prefecture_only_results + results
     
-    # 結果がない場合は空のリストを返す
-    # 結果が多すぎる場合は最初の50件に制限
     if len(final_results) > 50:
         final_results = final_results[:50]
         
     return final_results
 
-# 選択された場所文字列から都道府県と市区町村を分離する関数
 def split_location(location_string):
+    """選択された場所文字列から都道府県と市区町村を分離する関数"""
     if not location_string or location_string == "直接入力":
         return "", ""
     
-    # オンライン・Web開催の場合
     if location_string == "オンライン・Web開催":
         return "オンライン・Web開催", ""
         
     parts = location_string.split(" ", 1)
     if len(parts) == 2:
-        return parts[0], parts[1]  # 都道府県, 市区町村
+        return parts[0], parts[1]
     else:
-        return parts[0], ""  # 都道府県のみ
+        return parts[0], ""
 
-# スプレッドシートからデータを読み込む関数
+# データ読み込み・保存関連の関数（既存）
 def load_data():
     """スプレッドシートからデータを読み込む"""
     try:
@@ -274,42 +253,31 @@ def load_data():
             if worksheet is None:
                 return pd.DataFrame(columns=SHEET_COLUMNS)
             
-            # スプレッドシートの全データを取得
             all_values = worksheet.get_all_values()
             
             if not all_values or len(all_values) < 1:
                 return pd.DataFrame(columns=SHEET_COLUMNS)
             
-            # ヘッダー行を確認・修正
             header_row = all_values[0]
             
-            # ヘッダーが期待される列と異なる場合は修正
             if header_row != SHEET_COLUMNS:
                 print(f"ヘッダー行を修正します: {header_row} -> {SHEET_COLUMNS}")
-                # ヘッダー行を正しい列名に更新
                 worksheet.update('A1', [SHEET_COLUMNS])
-                # 再度データを取得
                 all_values = worksheet.get_all_values()
                 header_row = all_values[0]
             
-            # データが1行（ヘッダーのみ）の場合
             if len(all_values) == 1:
                 return pd.DataFrame(columns=SHEET_COLUMNS)
             
-            # DataFrameを作成
             df = pd.DataFrame(all_values[1:], columns=header_row)
             
-            # 必要な列が存在しない場合は追加
             for col in SHEET_COLUMNS:
                 if col not in df.columns:
                     df[col] = ""
             
-            # 列の順序を統一
             df = df[SHEET_COLUMNS]
-            
             return df
         
-        # リトライ機能付きで実行
         return retry_on_quota_error(_load_data_inner)
         
     except Exception as e:
@@ -320,7 +288,6 @@ def load_data():
             st.error(f"データ読み込みエラー: {e}")
         return pd.DataFrame(columns=SHEET_COLUMNS)
 
-# スプレッドシートにデータを追加する関数
 def append_row_to_sheet(row_data):
     """スプレッドシートに新しい行を追加"""
     try:
@@ -329,25 +296,19 @@ def append_row_to_sheet(row_data):
             if worksheet is None:
                 return False
             
-            # 行データを列の順序に合わせて整理
             row_values = []
             for col in SHEET_COLUMNS:
                 value = row_data.get(col, "")
-                # None値を空文字に変換
                 if value is None:
                     value = ""
                 row_values.append(str(value))
             
-            # スプレッドシートに行を追加
             worksheet.append_row(row_values)
-            
             return True
         
-        # リトライ機能付きで実行
         success = retry_on_quota_error(_append_row_inner)
         
         if success:
-            # キャッシュをクリア
             st.cache_data.clear()
         
         return success
@@ -360,180 +321,120 @@ def append_row_to_sheet(row_data):
             st.error(f"スプレッドシート書き込みエラー: {e}")
         return False
 
-# スプレッドシートのデータを更新する関数
-def update_row_in_sheet(row_id, updated_data):
-    """スプレッドシートの特定の行を更新"""
-    try:
-        worksheet = initialize_worksheet()
-        if worksheet is None:
-            return False
-        
-        # すべてのデータを取得
-        all_records = worksheet.get_all_records()
-        
-        # 該当するIDの行を探す
-        for i, record in enumerate(all_records):
-            if record.get('id') == row_id:
-                # 更新データを適用
-                for key, value in updated_data.items():
-                    if key in SHEET_COLUMNS:
-                        record[key] = value
-                
-                # 行番号を計算（ヘッダー行が1行目なので+2）
-                row_number = i + 2
-                
-                # 行データを列の順序に合わせて整理
-                row_values = []
-                for col in SHEET_COLUMNS:
-                    value = record.get(col, "")
-                    if value is None:
-                        value = ""
-                    row_values.append(str(value))
-                
-                # スプレッドシートの行を更新
-                worksheet.update(f'A{row_number}:{chr(65 + len(SHEET_COLUMNS) - 1)}{row_number}', [row_values])
-                
-                # キャッシュをクリア
-                st.cache_data.clear()
-                
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"スプレッドシート更新エラー: {e}")
-        st.error(f"スプレッドシート更新エラー: {e}")
-        return False
+# 新しい関数：地域別データ集計
 
-# スプレッドシートから行を削除する関数
-def delete_row_from_sheet(row_id):
-    """スプレッドシートから特定の行を削除"""
-    try:
-        worksheet = initialize_worksheet()
-        if worksheet is None:
-            return False
-        
-        # すべてのデータを取得
-        all_records = worksheet.get_all_records()
-        
-        # 該当するIDの行を探す
-        for i, record in enumerate(all_records):
-            if record.get('id') == row_id:
-                # 行番号を計算（ヘッダー行が1行目なので+2）
-                row_number = i + 2
-                
-                # 行を削除
-                worksheet.delete_rows(row_number)
-                
-                # キャッシュをクリア
-                st.cache_data.clear()
-                
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"スプレッドシート削除エラー: {e}")
-        st.error(f"スプレッドシート削除エラー: {e}")
-        return False
-
-# CSVファイルが存在しない場合は作成する関数（後方互換性のため残す）
-def initialize_csv():
-    pass  # スプレッドシート版では何もしない
-
-# 既存のCSVファイルを新しい形式にマイグレーションする関数（後方互換性のため残す）
-def migrate_csv_if_needed():
-    # スプレッドシートの初期化を実行
-    initialize_worksheet()
-
-# 新しい行を追加・保存する（汎用関数）
-def save_row(row_data):
-    return append_row_to_sheet(row_data)
-
-# 新しい投稿を保存する関数（イベントURL対応、Web開催対応）
-def save_submission(event_name, event_url, event_prefecture, event_municipality, event_date, 
-                   user_prefecture, user_municipality, reasons, comment):
-    
-    # 「選択なし」の場合は空文字に変換
-    if event_municipality == "選択なし":
-        event_municipality = ""
-    if user_municipality == "選択なし":
-        user_municipality = ""
-    
-    # Web開催の場合の特別処理
-    if event_prefecture == "オンライン・Web開催":
-        event_municipality = ""
-        # locationフィールドも同様に設定
-        location_value = "オンライン・Web開催"
-    else:
-        location_value = event_prefecture  # 後方互換性のため
-    
-    # 新規IDの生成
-    event_id = str(uuid.uuid4())
-    
-    # 新しい行を追加
-    new_row = {
-        "id": event_id,
-        "event_name": event_name,
-        "event_url": event_url if event_url else "",  # URLを追加
-        "location": location_value,  # 後方互換性のため
-        "event_prefecture": event_prefecture,
-        "event_municipality": event_municipality if event_municipality else "",
-        "event_date": event_date,
-        "user_prefecture": user_prefecture if user_prefecture else "",
-        "user_municipality": user_municipality if user_municipality else "",
-        "reasons": "|".join(reasons),  # 複数の理由を|で区切って保存
-        "comment": comment,
-        "submission_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "reason_details": ""
-    }
-    
-    return save_row(new_row)
-
-# 県別のイベント投稿数を集計する関数（Web開催対応）
 def count_by_prefecture():
+    """都道府県別の投稿数を集計"""
     df = load_data()
     if df.empty:
-        return pd.DataFrame(columns=["location", "count"])
+        return pd.DataFrame(columns=["prefecture", "count", "latitude", "longitude"])
     
-    # event_prefectureカラムがある場合はそれを使用、なければlocationを使用
-    if "event_prefecture" in df.columns and not df["event_prefecture"].isna().all():
-        counts = df["event_prefecture"].value_counts().reset_index()
-    else:
-        counts = df["location"].value_counts().reset_index()
+    # Web開催を除く
+    regional_df = df[df['event_prefecture'] != 'オンライン・Web開催']
     
-    counts.columns = ["location", "count"]
+    if regional_df.empty:
+        return pd.DataFrame(columns=["prefecture", "count", "latitude", "longitude"])
+    
+    counts = regional_df['event_prefecture'].value_counts().reset_index()
+    counts.columns = ["prefecture", "count"]
+    
+    # 座標を追加
+    counts['latitude'] = counts['prefecture'].apply(
+        lambda pref: PREFECTURE_LOCATIONS.get(pref, [None, None])[0]
+    )
+    counts['longitude'] = counts['prefecture'].apply(
+        lambda pref: PREFECTURE_LOCATIONS.get(pref, [None, None])[1]
+    )
+    
+    # 座標がないものを除外
+    counts = counts.dropna(subset=['latitude', 'longitude'])
+    
     return counts
 
-# イベント県と居住県のクロス集計を行う関数（Web開催対応）
-def cross_tabulate_prefectures():
+def count_by_municipality_in_prefecture(prefecture):
+    """特定都道府県内の市区町村別投稿数を集計"""
     df = load_data()
     if df.empty:
-        return None
+        return pd.DataFrame(columns=["municipality", "count", "latitude", "longitude", "prefecture"])
     
-    # 新しいカラム構造に対応
-    user_pref_col = "user_prefecture" if "user_prefecture" in df.columns else None
-    event_pref_col = "event_prefecture" if "event_prefecture" in df.columns else "location"
+    # 指定都道府県のデータのみ
+    pref_df = df[df['event_prefecture'] == prefecture]
     
-    if user_pref_col is None or df[user_pref_col].isna().all() or (df[user_pref_col] == "").all():
-        return None
+    if pref_df.empty:
+        return pd.DataFrame(columns=["municipality", "count", "latitude", "longitude", "prefecture"])
     
-    # 有効な居住県データがある行のみを対象に
-    valid_df = df[(df[user_pref_col].notna()) & (df[user_pref_col] != "")]
-    if valid_df.empty:
-        return None
+    # 市区町村別の集計
+    municipal_counts = defaultdict(int)
+    coordinates = {}
     
-    # クロス集計
-    cross_tab = pd.crosstab(valid_df[user_pref_col], valid_df[event_pref_col])
-    return cross_tab
+    for _, row in pref_df.iterrows():
+        municipality = row.get('event_municipality', '')
+        
+        if not municipality or municipality == "選択なし":
+            # 市区町村不明の場合は県庁所在地
+            key = f"{prefecture}（詳細不明）"
+            municipal_counts[key] += 1
+            if prefecture in PREFECTURE_LOCATIONS:
+                coordinates[key] = PREFECTURE_LOCATIONS[prefecture]
+        else:
+            municipal_counts[municipality] += 1
+            lat, lon = get_municipality_coordinates(prefecture, municipality)
+            if lat is not None and lon is not None:
+                coordinates[municipality] = (lat, lon)
+    
+    # DataFrame作成
+    result_data = []
+    for municipality, count in municipal_counts.items():
+        if municipality in coordinates:
+            lat, lon = coordinates[municipality]
+            result_data.append({
+                "municipality": municipality,
+                "count": count,
+                "latitude": lat,
+                "longitude": lon,
+                "prefecture": prefecture  # 追加：都道府県情報
+            })
+    
+    return pd.DataFrame(result_data)
 
-# 理由別の集計を行う関数
+def get_posts_by_prefecture(prefecture):
+    """特定都道府県の投稿を取得"""
+    df = load_data()
+    if df.empty:
+        return df
+    
+    return df[df['event_prefecture'] == prefecture]
+
+def get_posts_by_municipality(prefecture, municipality):
+    """特定市区町村の投稿を取得"""
+    df = load_data()
+    if df.empty:
+        return df
+    
+    pref_df = df[df['event_prefecture'] == prefecture]
+    
+    if municipality and municipality != "選択なし":
+        return pref_df[pref_df['event_municipality'] == municipality]
+    else:
+        # 市区町村不明のもの
+        return pref_df[(pref_df['event_municipality'] == "") | 
+                      (pref_df['event_municipality'] == "選択なし") |
+                      (pref_df['event_municipality'].isna())]
+
+def get_online_posts():
+    """オンライン開催の投稿を取得"""
+    df = load_data()
+    if df.empty:
+        return df
+    
+    return df[df['event_prefecture'] == 'オンライン・Web開催']
+
 def count_by_reason():
+    """理由別の集計を行う関数"""
     df = load_data()
     if df.empty:
         return pd.DataFrame(columns=["理由", "件数"])
     
-    # reasonsの集計
     reasons_count = {}
     for idx, row in df.iterrows():
         if pd.isna(row["reasons"]) or row["reasons"] == "":
@@ -552,100 +453,79 @@ def count_by_reason():
     
     return reasons_df
 
-# データハッシュを計算する関数
+def get_basic_statistics():
+    """基本統計情報を取得"""
+    df = load_data()
+    
+    if df.empty:
+        return {
+            'total_posts': 0,
+            'unique_events': 0,
+            'prefectures': 0,
+            'online_posts': 0,
+            'recent_posts': 0
+        }
+    
+    total_posts = len(df)
+    unique_events = df['event_name'].nunique()
+    prefectures = len(df[df['event_prefecture'] != 'オンライン・Web開催']['event_prefecture'].unique())
+    online_posts = len(df[df['event_prefecture'] == 'オンライン・Web開催'])
+    
+    # 最近7日間の投稿数
+    df_temp = df.copy()
+    df_temp['submission_date'] = pd.to_datetime(df_temp['submission_date'], errors='coerce')
+    recent_cutoff = datetime.now() - pd.Timedelta(days=7)
+    recent_posts = len(df_temp[df_temp['submission_date'] > recent_cutoff])
+    
+    return {
+        'total_posts': total_posts,
+        'unique_events': unique_events,
+        'prefectures': prefectures,
+        'online_posts': online_posts,
+        'recent_posts': recent_posts
+    }
+
+# 修正されたsave_submission関数（generated_postパラメータを追加）
+def save_submission(event_name, event_url, event_prefecture, event_municipality, event_date, 
+                   user_prefecture, user_municipality, reasons, comment, generated_post=""):
+    
+    if event_municipality == "選択なし":
+        event_municipality = ""
+    if user_municipality == "選択なし":
+        user_municipality = ""
+    
+    if event_prefecture == "オンライン・Web開催":
+        event_municipality = ""
+        location_value = "オンライン・Web開催"
+    else:
+        location_value = event_prefecture
+    
+    event_id = str(uuid.uuid4())
+    
+    new_row = {
+        "id": event_id,
+        "event_name": event_name,
+        "event_url": event_url if event_url else "",
+        "location": location_value,
+        "event_prefecture": event_prefecture,
+        "event_municipality": event_municipality if event_municipality else "",
+        "event_date": event_date,
+        "user_prefecture": user_prefecture if user_prefecture else "",
+        "user_municipality": user_municipality if user_municipality else "",
+        "reasons": "|".join(reasons),
+        "comment": comment,
+        "generated_post": generated_post,  # 追加: 生成された投稿文
+        "submission_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reason_details": ""
+    }
+    
+    return append_row_to_sheet(new_row)
+
+def migrate_csv_if_needed():
+    initialize_worksheet()
+
 def calculate_data_hash(df):
     if df.empty:
         return "empty"
-    # 最新10件のデータのハッシュを計算
     recent_data = df.tail(10).to_json()
     return hashlib.md5(recent_data.encode()).hexdigest()
-
-# データをIDで検索する関数
-def get_row_by_id(row_id):
-    df = load_data()
-    if df.empty or "id" not in df.columns:
-        return None
-    
-    result = df[df["id"] == row_id]
-    if result.empty:
-        return None
-    
-    return result.iloc[0].to_dict()
-
-# データを更新する関数
-def update_row(row_id, updated_data):
-    return update_row_in_sheet(row_id, updated_data)
-
-# データを削除する関数（管理者用）
-def delete_row(row_id):
-    return delete_row_from_sheet(row_id)
-
-# スプレッドシートをリセットする関数（デバッグ用）
-def reset_spreadsheet():
-    """スプレッドシートを完全にリセットして正しいヘッダーを設定"""
-    try:
-        worksheet = get_spreadsheet().worksheet("ikitakatta_data")
-        
-        # ワークシートを完全にクリア
-        worksheet.clear()
-        
-        # 正しいヘッダーを設定
-        worksheet.update('A1', [SHEET_COLUMNS])
-        
-        print("スプレッドシートをリセットしました")
-        return True
-        
-    except Exception as e:
-        print(f"スプレッドシートリセットエラー: {e}")
-        return False
-
-# Web開催やオンライン開催のイベント数を取得する関数
-def count_online_events():
-    """オンライン・Web開催のイベント数を取得"""
-    df = load_data()
-    if df.empty:
-        return 0
-    
-    # event_prefectureカラムでWeb開催をカウント
-    if "event_prefecture" in df.columns:
-        online_count = len(df[df["event_prefecture"] == "オンライン・Web開催"])
-    else:
-        online_count = len(df[df["location"] == "オンライン・Web開催"])
-    
-    return online_count
-
-# 地域別データとオンラインデータを分けて取得する関数
-def get_location_statistics():
-    """地域別統計とオンライン統計を分けて取得"""
-    df = load_data()
-    if df.empty:
-        return {
-            "regional_data": pd.DataFrame(columns=["location", "count"]),
-            "online_count": 0,
-            "total_count": 0
-        }
-    
-    # 全体の統計
-    total_count = len(df)
-    
-    # オンライン開催の統計
-    online_count = count_online_events()
-    
-    # 地域別データ（オンライン開催を除く）
-    regional_df = df[df.get("event_prefecture", df.get("location", "")) != "オンライン・Web開催"]
-    
-    if not regional_df.empty:
-        if "event_prefecture" in regional_df.columns and not regional_df["event_prefecture"].isna().all():
-            regional_counts = regional_df["event_prefecture"].value_counts().reset_index()
-        else:
-            regional_counts = regional_df["location"].value_counts().reset_index()
-        
-        regional_counts.columns = ["location", "count"]
-    else:
-        regional_counts = pd.DataFrame(columns=["location", "count"])
-    
-    return {
-        "regional_data": regional_counts,
-        "online_count": online_count,
-        "total_count": total_count
-    }
